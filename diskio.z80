@@ -1,0 +1,493 @@
+	.z80
+	ASEG
+	org 0100h
+	.phase 0f000h
+
+TC_OFF		EQU 	0e0h
+TC_ON		EQU 	0e2h
+FDC_STATUS	EQU 	0e4h
+FDC_DATA	EQU	0e5h
+FDC_CONTROL	EQU	0e6h
+
+; -------------------
+;
+; Disk I/O
+;
+; -------------------
+
+STATUS_RQM EQU 80h
+STATUS_DIO EQU 40h
+STATUS_NDM EQU 20h
+STATUS_CB EQU 10h
+
+MOTOR_ON  EQU 40h
+MOTOR_OFF_REQ  EQU 01h
+MOTOR_OFF EQU 00h
+
+MOTOR_OFF_COUNT EQU  7    ;; 4.1 * 7= 29 sec
+
+MFM       EQU 40h
+
+FDD_RW_FORMAT EQU 2
+FDD_RW_READ  EQU 1
+FDD_RW_WRITE EQU 0
+
+; -------------------
+;
+; Starter
+;
+; -------------------
+	ld a, 00h
+	ld de, 0101h
+	ld b, 16
+	call fdd_setparam
+	ld hl, 0e000h
+	ld a, FDD_RW_WRITE
+	call fdd_rw
+	ld a, 0
+	jr nc, proc_end
+	ld a, 0ffh
+proc_end:
+	ld (ret_status), a
+	ret
+
+; -------------------
+;  Set FDD R/W param
+;
+; D  : Track#
+; E  : Sector#
+; B  : Number of R/W sectors
+; A  : side 0 0 0 0 0 Drive Drive
+; -------------------
+fdd_setparam:
+	ld ix, fdc_param
+	; Parameter D (cylinder)
+	ld (ix+2), d
+	; Parameter E (Sector)
+	ld (ix+4), e
+	; Others
+	ld (ix+5), 1   ; N=1:256 bytes/sector
+	; Parameter A
+	and 83h ;; mask side & drive
+	ld d, a
+	rlca
+	and 01h
+	ld (ix+3), a   ; Header
+	rlca
+	rlca
+	or d
+	and 07h
+	ld (ix+1), a   ; HD, US1, US0
+	; Parameter B
+	ld (ix+9), b   ; Number of sectors
+	ld a, b
+	add a, e
+	dec a
+	ld (ix+6), a   ; EOT
+	ld (ix+7), 0eh   ; GSL
+	ld (ix+8), 0ffh   ; DTL
+	ret
+
+; -------------------
+;  FDD Read/Write 
+;
+; HL : Read/Write data area
+;  a : 0 : write, 1: read
+; -------------------
+fdd_rw:
+	push hl
+	; preserve command code
+	ld (fdc_param + 10), a
+	; Prepare for R/W
+	di
+	ld a, MOTOR_ON
+	out (FDC_CONTROL), a
+fdd_rw_spinup:
+	;ld a, (INTCOUNT)
+	;cp h
+	;jr nz, fdd_rw_spinup
+fdd_rw1:
+	call sense_int_status
+	;; ignore errors
+	; check same track
+	ld hl, cur_track
+	ld a, (fdc_param + 1)  ; HD, US1, US0
+	and 03h
+	ld d, 0
+	ld e, a
+	add hl, de
+	ld a, (fdc_param + 2)  ; Cylinder
+	ld d, a
+	ld a, (hl)
+	ld e, a
+	cp 0ffh
+	jr nz, fdd_rw2
+	push de
+	call recalibrate
+	pop de
+	jr c, fdd_other_err
+fdd_recalib2:
+	call sense_int_status
+	jr c, fdd_err
+	; check seek end
+	and 20h
+	jr z, fdd_recalib2
+fdd_rw2:
+	ld a, d
+	cp e
+	; not same .. seek
+	; - Workaround: (Emulator bug?) 
+	;   always seek for cheking drive status
+	; jr z, fdd_rw3 
+	call seek
+	jr c, fdd_other_err
+fdd_rw21:
+	call sense_int_status
+	jr c, fdd_err
+	; check seek end
+	and 20h
+	jr z, fdd_rw21
+
+	call update_cur_track
+fdd_rw3:
+	; Set FDC command
+	ld a, (fdc_param+10)
+	or a
+	jr z, fdd_write
+	cp FDD_RW_FORMAT
+	jp z, fdd_format
+	ld a, 06h or MFM
+	jr fdd_rw_setcom
+fdd_write:
+	ld a, 05h or MFM
+fdd_rw_setcom:
+	ld (fdc_param), a
+	ld c, 9
+	di
+	call c_phase
+	jr c, fdd_other_err
+	; Exec R/W
+	pop hl         ; Read/write buffer
+	ld a, (fdc_param+9) ; Number of sectors
+	ld d, a
+	ld e, 0        ; de = number of read (256bytes/sector)
+	call e_phase
+	call r_phase
+	ei
+	jp c, other_error
+	; Check status
+	ld a, (fdc_resp)
+	ld c, a
+	and 0c0h
+	jr z, fdd_set_motor_off   ; normal end
+	; Error
+	ld a, c
+	bit 3, a
+	jp nz, not_ready_err
+	ld a, (fdc_resp+1)
+	bit 1, a
+	jr nz, wp_err
+	jr other_error
+wp_err:
+	ld a, 8
+	scf
+	jr fdd_set_motor_off
+
+fdd_err:
+	pop hl
+	jr fdd_set_motor_off
+
+fdd_other_err:
+	ei
+	pop hl
+	jr other_error
+
+fdd_set_motor_off:
+	ret
+
+	; -------------------
+	; SEEK
+	; -------------------
+seek:   
+	ld a, 0Fh
+	ld (fdc_param), a
+	ld c, 3
+	call c_phase
+	ret c
+	call wait_int
+	ret
+
+update_cur_track:
+	; Updte current track
+	ld hl, cur_track
+	ld a, (fdc_param + 1)
+	and 03h
+	ld d, 0
+	ld e, a
+	add hl, de
+	ld a, (fdc_param + 2)
+	ld (hl), a
+	ret
+
+	; -------------------
+	; SENSE DEVICE STATUS
+	; -------------------
+sense_dev_status:
+	ld a, 04h
+	ld (fdc_param), a
+	ld c, 2
+	call c_phase
+	ret c
+
+	call r_phase
+	ret c
+
+	ld a, (fdc_resp)
+	ret
+
+	; -------------------
+	; SENSE INTERRUPT STATUS
+	; -------------------
+sense_int_status:
+	ld a, 08h
+	ld (fdc_param), a
+	ld c, 1
+	call c_phase
+	ret c
+
+	call r_phase
+	ret c
+
+	ld a, (fdc_resp)
+	cp 80h
+	ld c, a
+	; Invalid is treated as normal
+	jr z, sense_int_normal
+	; Equipment check, Not ready
+	ld c, a
+	and 18h
+	jr nz, not_ready_err
+	; Interrupt Code check
+	ld a, c
+	and 0c0h
+	jr z, sense_int_normal
+other_error:
+	ld a, 0ffh
+	scf
+	jr fdd_set_motor_off
+
+not_ready_err:
+	ld a, 01h
+	scf
+	jr fdd_set_motor_off
+
+sense_int_normal:
+	ld a, c
+	; Normal end
+	ret
+
+recalibrate:
+	ld a, 07h
+	ld (fdc_param), a
+	ld c, 2
+	call c_phase
+	ret c
+	call wait_int
+	ret
+
+	; -----------------------------
+	; C-PHASE
+	; C : number of parameter
+	; -----------------------------
+c_phase:
+	; wait cb=0
+	in a, (FDC_STATUS)
+	cp 0ffh
+	jr nz, c_phase1
+	; unexpected error
+	; FDC reset needed
+	scf
+	ret
+c_phase1:        
+	and status_cb
+	jr nz, c_phase
+	ld hl, fdc_param
+
+	; send parameters
+wait_rqm:
+	; wait RQM=1, DIO = 0
+	in a, (FDC_STATUS)
+	and (STATUS_RQM or STATUS_DIO)
+	cp STATUS_RQM
+	jr nz, wait_rqm
+
+	; Write parameter
+	ld a,(hl)
+	out (FDC_DATA), a
+	inc hl
+	dec c
+	jr nz, wait_rqm
+	ret
+
+wait_int:
+	; wait int = 1 (no timeout)
+	in a, (FDC_CONTROL)
+	bit 7, a
+	jr z, wait_int
+	ret
+
+	; -----------------------------
+	; E-PHASE
+	; HL : pointer to data area
+	; DE : number of read/write
+	; -----------------------------
+e_phase:
+	; With wait_int, it greatly hit
+	; access performance on emulator
+	;call wait_int
+	ld bc, 00e5h
+e_phase1:
+	; Check RQM=1
+	in a, (FDC_STATUS)
+	rlca
+	jr nc, e_phase1
+	; Check DIO
+	rlca 
+	jr nc, e_phase_write
+	; Check NDM
+	rlca
+	jr nc, e_phase_end
+e_phase_read:
+	ini
+	;jr nz, e_phase1
+	dec de
+	ld a, e
+	or d
+	jr nz, e_phase1
+
+e_phase_end:
+	; TC ON - OFF
+	out (TC_ON), a
+	out (TC_OFF), a
+	ret
+
+e_phase_write:
+	; Check NDM
+	rlca
+	jr nc, e_phase_end
+	outi
+	dec de
+	ld a, e
+	or d
+	jr nz, e_phase1
+	jr e_phase_end
+
+	; -----------------------------
+	; R-PHASE
+	; -----------------------------
+r_phase:
+	; With wait_int, it greatly hit
+	; access performance on emualtor
+	;call wait_int
+	ld hl, fdc_resp
+r_phase1:
+	; wait RQM=1, DIO=1
+	in a,(FDC_STATUS)
+	cp 0ffh
+	jr nz, r_phase2
+	; unexpeceted error
+	; FDC reset needed
+	scf
+	ret
+
+r_phase2:
+	rlca
+	jr nc, r_phase1
+	rlca
+	ret nc
+	in a, (FDC_DATA)
+	ld (hl), a
+	inc hl
+	jr r_phase1
+
+	; -----------------------------
+	; FORMAT
+	; -----------------------------
+PARAM_N	EQU  1    ; 256bytes/sector
+PARAM_SC EQU  16  ; 16sector/track
+PARAM_GPL EQU 32h
+PARAM_D  EQU  0e5h  ; initial data
+
+fdd_format:
+	;; prepare e-phase data
+	ld hl, fmt_tmp
+	ld ix, fdc_param
+	ld e, 1
+	ld b, 16
+	ld c, (ix+2)
+	ld d, (ix+3)
+fdd_fmt1:
+	; C
+	ld (hl), c
+	inc hl
+	; H
+	ld (hl), d
+	inc hl
+	; R
+	ld (hl), e
+	inc hl
+	inc e
+	; N
+	ld (hl), PARAM_N
+	inc hl
+	djnz fdd_fmt1
+fdd_fmt2:
+	ld a, 0dh or MFM
+	ld (fdc_param), a
+	ld a, PARAM_N
+	ld (fdc_param+2), a
+	ld a, PARAM_SC
+	ld (fdc_param+3), a
+	ld a, PARAM_GPL
+	ld (fdc_param+4), a
+	ld a, PARAM_D
+	ld (fdc_param+5), a
+	ld c, 6
+	call c_phase
+	jr c, fdd_fmterr
+
+	;; Exec
+	ld hl, fmt_tmp
+	ld de, PARAM_SC * 4
+	call e_phase
+
+	;; Result
+	call r_phase
+
+fdd_fmterr:
+	pop hl
+	ret
+
+
+	; -------------------
+	; WORK RAM
+	; -------------------
+fdc_param:
+	; FDC parameter
+	ds      11
+fdc_resp:
+	; FDC response
+	ds      7
+cur_track:
+	; Current track# (4 drives)
+	db	0ffh, 0ffh, 0ffh, 0ffh
+ret_status:
+	db	00h
+
+fmt_tmp:
+	ds    3*16
+
+prg_end:
+
+	.dephase
+	end
