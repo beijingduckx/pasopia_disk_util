@@ -14,7 +14,8 @@ PASOPIA/PASOPIA7 (PA7010/PA7007) 用のディスクユーティリティです�
 1. PASOPIAのディスクドライブ、PASOPIAの電源を入れます
 1. PASOPIA7では、'How many disk drives'には 0を指定します
 1. BASICのプロンプトで `CLOAD`+<kbd>Return</kbd> を入力します
-1. メディアプレイヤーなどで`DiskUtil.wav`を再生します
+1. メディアプレイヤーなどで`DiskUtil.wav`を再生します  
+   (`DiskUtil.wav`は、[こちら](https://github.com/beijingduckx/pasopia_disk_util/releases/) からダウンロードしてください)
 1. CLOADが終了したら、`RUN`します
 1. 画面の表示に従って操作します。メニューからは  
    0: ディスクイメージ書き込み  
@@ -23,7 +24,7 @@ PASOPIA/PASOPIA7 (PA7010/PA7007) 用のディスクユーティリティです�
    を選択します
 
 
-[!NOTE]
+> [!NOTE]
 > - 画面に出る`Track:`番号は論理的なトラック番号で、0はTrack0:Side0, 1は Track0:Side1.. のようになっています
 > - PASOPIA7では、念のため、本プログラム実行後は一旦リセットしてください。BIOSが管理しているディスク状態と、実際のドライブの状態がずれるためです
 
@@ -58,15 +59,15 @@ Windowsマシンにあるディスクイメージを、カセットインター�
 
 が69トラックまで繰り返されます。
 
-[!NOTE]
+> [!NOTE]
 > Windowsの音声出力レベルは、
 > - メディアプレイヤー(`DiskUtil.wav`再生)内の音量調整は、最大にしつつ
 > - マスターボリュームは 50 (真ん中の位置) 
 >
 > あたりが良いようですが、環境に応じて調整してください。
 
-[!NOTE]
-- PASOPIA側がリードエラーとなった場合は、PC側のプログラムを手動で停止してください (PCとPASOPIAはハンドシェークしていません)
+> [!NOTE]
+> - PASOPIA側がリードエラーとなった場合は、PC側のプログラムを手動で停止してください (PCとPASOPIAはハンドシェークしていません)
 
 ### イメージ書き込みの制限
 - 対応しているディスクイメージは、256bytes/sectorのベタイメージのみです (Track0, Side0の全セクタも256bytes/sectorの必要があります)
