@@ -1,7 +1,7 @@
 	.z80
 	ASEG
 	org 0100h
-	.phase 0f000h
+	.phase 0e800h
 
 TC_OFF		EQU 	0e0h
 TC_ON		EQU 	0e2h
@@ -41,7 +41,7 @@ FDD_RW_WRITE EQU 0
 	ld de, 0101h
 	ld b, 16
 	call fdd_setparam
-	ld hl, 0e000h
+	ld hl, 0d000h
 	ld a, FDD_RW_WRITE
 	call fdd_rw
 	ld a, 0
@@ -102,11 +102,22 @@ fdd_rw:
 	di
 	ld a, MOTOR_ON
 	out (FDC_CONTROL), a
-fdd_rw_spinup:
-	;ld a, (INTCOUNT)
-	;cp h
-	;jr nz, fdd_rw_spinup
-fdd_rw1:
+
+	;; Wait for device ready
+	ld bc, 60000
+fdd_sensdrv:
+	push bc
+	call sense_dev_status
+	pop bc
+	jp c, fdd_err
+	ld l, a
+	dec bc
+	ld a, b
+	or c
+	jp z, fdd_err
+	ld a, l
+	and 20h
+	jr z, fdd_sensdrv
 	call sense_int_status
 	;; ignore errors
 	; check same track
@@ -122,31 +133,23 @@ fdd_rw1:
 	ld e, a
 	cp 0ffh
 	jr nz, fdd_rw2
-	push de
+	;push de
 	call recalibrate
-	pop de
+	;pop de
+	jp c, fdd_other_err
+	call wait_seek
 	jr c, fdd_other_err
-fdd_recalib2:
-	call sense_int_status
-	jr c, fdd_err
-	; check seek end
-	and 20h
-	jr z, fdd_recalib2
 fdd_rw2:
-	ld a, d
-	cp e
+	;ld a, d
+	;cp e
 	; not same .. seek
 	; - Workaround: (Emulator bug?) 
-	;   always seek for cheking drive status
+	;   always seek for checking drive status
 	; jr z, fdd_rw3 
 	call seek
 	jr c, fdd_other_err
-fdd_rw21:
-	call sense_int_status
-	jr c, fdd_err
-	; check seek end
-	and 20h
-	jr z, fdd_rw21
+	call wait_seek
+	jr c, fdd_other_err
 
 	call update_cur_track
 fdd_rw3:
@@ -181,19 +184,19 @@ fdd_rw_setcom:
 	and 0c0h
 	jr z, fdd_set_motor_off   ; normal end
 	; Error
-	ld a, c
-	bit 3, a
+	bit 3, c
 	jp nz, not_ready_err
 	ld a, (fdc_resp+1)
 	bit 1, a
 	jr nz, wp_err
-	jr other_error
+	jp other_error
 wp_err:
 	ld a, 8
 	scf
 	jr fdd_set_motor_off
 
 fdd_err:
+	scf
 	pop hl
 	jr fdd_set_motor_off
 
@@ -229,6 +232,19 @@ update_cur_track:
 	ld (hl), a
 	ret
 
+wait_seek:
+	call sense_int_status
+	jr nc, wait_seek1
+	cp 1   ;; Not ready
+	jr z, wait_seek
+	scf
+	jp fdd_err
+wait_seek1:
+	; check seek end
+	and 20h
+	jr z, wait_seek
+	ret
+
 	; -------------------
 	; SENSE DEVICE STATUS
 	; -------------------
@@ -259,29 +275,33 @@ sense_int_status:
 	ret c
 
 	ld a, (fdc_resp)
-	cp 80h
 	ld c, a
-	; Invalid is treated as normal
-	jr z, sense_int_normal
-	; Equipment check, Not ready
-	ld c, a
-	and 18h
-	jr nz, not_ready_err
-	; Interrupt Code check
-	ld a, c
 	and 0c0h
 	jr z, sense_int_normal
+	cp 80h
+	; Invalid is treated as normal
+	jr z, sense_int_normal
+	bit 3, c
+	jr nz, not_ready_err
+	cp 40h
+	jr z, other_error
+	; Attention
+	; Equipment check
+	bit 4, c
+	jr nz, other_error
+	jr sense_int_normal
 other_error:
 	ld a, 0ffh
 	scf
-	jr fdd_set_motor_off
+	jp fdd_set_motor_off
 
 not_ready_err:
 	ld a, 01h
 	scf
-	jr fdd_set_motor_off
+	jp fdd_set_motor_off
 
 sense_int_normal:
+	or a		;; clear carry
 	ld a, c
 	; Normal end
 	ret
@@ -387,7 +407,7 @@ e_phase_write:
 	; -----------------------------
 r_phase:
 	; With wait_int, it greatly hit
-	; access performance on emualtor
+	; access performance on emulator
 	;call wait_int
 	ld hl, fdc_resp
 r_phase1:

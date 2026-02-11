@@ -166,7 +166,7 @@ function GenBinPcmData($binData, $loadAddr, $pasofile, $wav) {
 #
 
 $tmpFilename = Join-path $PSScriptRoot "./tmp.wav"
-$loadAddr = 0xe000
+$loadAddr = 0xd000
 
 $trackLength = 256 * 16
 $maxTrack = 70
